@@ -1,0 +1,1 @@
+python plot/plot_metric_experiments.py -root ../ -plot_type noise -plot_per_dataset

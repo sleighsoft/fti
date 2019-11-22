@@ -1,0 +1,4 @@
+python prd.py -train ../raw_data/inception-v3/mnist_train_to_inception-v3_N[-1].npy -test ../raw_data/inception-v3/mnist_test_to_inception-v3_N[-1].npy -savefile ../prd/inception-v3/mnist/mnist -no_timestamp;
+python prd.py -train ../raw_data/inception-v3/fashion_mnist_train_to_inception-v3_N[-1].npy -test ../raw_data/inception-v3/fashion_mnist_test_to_inception-v3_N[-1].npy -savefile ../prd/inception-v3/fashion_mnist/fashion_mnist -no_timestamp;
+python prd.py -train ../raw_data/inception-v3/cifar10_train_to_inception-v3_N[-1].npy -test ../raw_data/inception-v3/cifar10_test_to_inception-v3_N[-1].npy -savefile ../prd/inception-v3/cifar10/cifar10 -no_timestamp;
+python prd.py -train ../raw_data/inception-v3/cifar100_train_to_inception-v3_N[-1].npy -test ../raw_data/inception-v3/cifar100_test_to_inception-v3_N[-1].npy -savefile ../prd/inception-v3/cifar100/cifar100 -no_timestamp;
