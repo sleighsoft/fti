@@ -125,7 +125,7 @@ def noise(
     )
     precision_fti /= precision_fti[0]
     recall_fti = np.array(
-        [metric_data["fti"][noise_amount]["impact"] for noise_amount in noise_amounts]
+        [metric_data["fti.swapped"][noise_amount]["impact"] for noise_amount in noise_amounts]
     )
     recall_fti /= recall_fti[0]
 

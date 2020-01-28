@@ -16,11 +16,17 @@ Setup environment with Conda:
 ## Directory Structure
 
 `data`: Contains code to generate raw data for the metrics.
+
 `figures`: Contains figures from the paper.
+
 `metrics`: Contains implementations for all the metrics.
+
 `misc`: Contains helper code (e.g. used image distortions).
+
 `models`: Contains code to use various auxiliary classifiers. See [models/frozen_models/README.md](models/frozen_models/README.md) for more details.
+
 `plot`: Contains code to plot the figures as reported in the paper.
+
 `scripts`: Contains shell scripts (containing a list of python commands) to prepare the data and run all experiments.
 
 Files under root:
