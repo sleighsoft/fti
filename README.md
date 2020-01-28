@@ -43,7 +43,9 @@ Scripts to prepare the data and run all experiments are located under `scripts/`
 **Note**: Scripts should be executed from the root directory of this repository.
 
 `scripts/raw_data`: Contains scripts to generate data for the various experiments.
+
 `scripts/<metric>`: Contains scripts to run experiments for a metric.
+
 `scripts/plot`: Contains the commands to plot the experiment results.
 
 ## Contributions
