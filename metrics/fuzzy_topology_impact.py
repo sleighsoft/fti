@@ -170,7 +170,7 @@ def parallel_take_by_advanced_index(X, advanced_indices):
     return new_array
 
 
-@numba.njit(cache=True)
+@numba.njit(parallel=False, cache=True)
 def insert_and_update_mask(
     knn_indices,
     knn_mask,
@@ -178,143 +178,115 @@ def insert_and_update_mask(
     index,
     insertion_indices,
     insertion_knn_dists,
-    n_neighbors,
+    k,
+    indices_shifted_by=1,
 ):
-    """Allows updating an adative knn_indices result and its knn_mask. Inserts index at insertion_indices
-    into knn_indices by shifting original values to the right. This method insures that the
-    constrained of maintaining equally farthest neighbors holds and updates knn_mask accordingly.
+    """Allows updating an `parallel_adaptive_knn` result and its knn_mask. Inserts
+    index at insertion_indices into knn_indices by shifting original values to
+    the right. This method insures that the constraint of maintaining equally
+    farthest neighbors holds and updates knn_mask accordingly.
 
     It does this by looking at new_knn_dists and old_knn_dists.
 
     Parameters
     ----------
-    knn_indices : 2-D array of shape [N, n_neighbors]
+    knn_indices : 2-D array of shape [N, M]
         k-NN indices.
-    insertion_indices : 1-D array of shape [N]
-        Indices where index will be inserted.
+
+    knn_mask : 2-D boolean array of shape [N, M]
+        Mask corresponding to knn_indices.
+
+    knn_dists : 2-D array of shape [N, M]
+        Distances corresponding to knn_indices.
+
     index : scalar
         An index to insert into knn_indices.
-    knn_mask : 2-D boolean array of same shape as knn_indices
-        Mask corresponding to knn_indices.
+
+    insertion_indices : 1-D array of shape [N]
+        Precomputed positions where index will be inserted. Should always be
+        left of index with identical distance.
+
     insertion_knn_dists : 1-D array of shape [N]
         Distances of index to row (point).
-    knn_dists : 1-D array of same shape as knn_indices
-        Distances corresponding to knn_indices.
-    n_neighbors : scalar (int)
-        Number of nearest neighbors.
 
+    k : int, whith k <= M
+        Number of nearest neighbors used to compute knn_indices. Note, that this
+        definition of k includes the center point itself.
+        
+        A -- B -- C -- D
+
+        3-NN of A is C
+        4-NN of A is D
+
+    indices_shifted_by : int
+        The amount of places knn_indices has been shifted. A positive value
+        indicates a right shift.
 
     Returns
     -------
-    new_knn_indices: array of shape (knn_indices[0], knn_indices[1]+1)
+    new_knn_indices: array of shape (N, M+1)
         Updated knn_indices.
-    new_knn_mask: array of shape (knn_indices[0], knn_indices[1]+1)
+
+    new_knn_mask: array of shape (N, M+1)
         Updated knn_mask.
     """
-    # Both the knn_indices and knn_mask grow by at most 1 column
-    new_knn_indices = np.full(
-        (knn_indices.shape[0], knn_indices.shape[1] + 1), -1, dtype=knn_indices.dtype
-    )
-    new_knn_mask = np.zeros(
-        (knn_indices.shape[0], knn_indices.shape[1] + 1), dtype=knn_mask.dtype
-    )
+    N = knn_indices.shape[0]
+    M = knn_indices.shape[1]
+    # Internally, we use the definition of k that does not inlcude
+    k = k - 1
+    # Both knn_indices and knn_mask grow by at most 1 column when index is
+    # inserted.
+    # shape = [N, M + 1]
+    new_knn_indices = np.full((N, M + 1), -1, dtype=knn_indices.dtype)
+    # shape = [N, M + 1]
+    new_knn_mask = np.zeros((N, M + 1), dtype=knn_mask.dtype)
+    # Copy knn_mask into new_knn_mask
     new_knn_mask[:, :-1] = knn_mask
-    # TODO Currently does not support parallel
-    for i in numba.prange(new_knn_indices.shape[0]):
+    for i in numba.prange(N):
+        # Where to put index
         pos = insertion_indices[i]
+        # Row to be updated
         new_knn_indices_row = new_knn_indices[i]
+        # Mask to be updated
         new_knn_mask_row = new_knn_mask[i]
+        # Original knn indices
         knn_indices_row = knn_indices[i]
+        # Distances matching original knn indices
         knn_dists_row = knn_dists[i]
-        if pos < knn_indices.shape[1]:
+        # Distance of index to center
+        index_distance = insertion_knn_dists[i]
+        if pos <= k:
+            # Update indices
             new_knn_indices_row[pos] = index
             if pos != 0:
                 # Part before pos
                 new_knn_indices_row[:pos] = knn_indices_row[:pos]
             # Part after pos
             new_knn_indices_row[pos + 1 :] = knn_indices_row[pos:]
-            # Update knn_mask (3 cases)
-            # 1. Inserted point's distance is identical to farthest neighbor
-            #    => True knn_mask grows by 1
-            #    - Example: 5 points, k=4 (so 3 closest neighbors excluding itself)
-            #      A|B    C D E
-            #      C -> D = 1
-            #      C -> E = 2
-            #      C -> A&B = 3
-            #
-            #      KNN_INDICES[C] = C D E A B
-            #      KNN_MASK[C]    = T T T T T
-            #
-            #   -> Now insert point F at distance = 3 to C
-            #      KNN_INDICES[C] = C D E F A B
-            #      KNN_MASK[C]    = T T T T T T
-            #
-            # 2. Inserted point's distance is not identical to farthest neighbor
-            #    BUT ... multiple "identical farthest neighbors" exist
-            #    2.1 new_knn_indices farthest neighbor
-            #        => True knn_mask shrinks to k
-            #        - Example: 5 points, k=4 (so 3 closest neighbors excluding itself)
-            #          A|B    C D E
-            #          C -> D = 1
-            #          C -> E = 2
-            #          C -> A&B = 3
-            #
-            #          KNN_INDICES[C] = C D E A B
-            #          KNN_MASK[C]    = T T T T T
-            #
-            #       -> Now insert point F at a distance < 3 to C, e.g. 1.5
-            #          => Now E!=A|B
-            #          KNN_INDICES[C] = C D F E A B
-            #          KNN_MASK[C]    = T T T T F F
-            #    2.2 Farthest neighbor is still identical to previous farthest neighbor
-            #        => True knn_mask grows by 1
-            #        - Example: 5 points, k=5 (so 3 closest neighbors excluding itself)
-            #          A|B    C D|E
-            #          C -> D&E = 2
-            #          C -> A&B = 3
-            #
-            #          KNN_INDICES[C] = C D E A B
-            #          KNN_MASK[C]    = T T T T T
-            #
-            #       -> Now insert point F at a distance < 3 to C, e.g. 1.5
-            #          KNN_INDICES[C] = C F D E A B
-            #          KNN_MASK[C]    = T T T T T T
-            # 3. Else
-            #    => No change of True knn_mask necessary
-            #    - Example: 4 points, k=4 (so 3 closest neighbors excluding itself)
-            #      A    C D E
-            #      C -> D = 1
-            #      C -> E = 2
-            #      C -> A = 3
-            #
-            #      KNN_INDICES[C] = C D E A
-            #      KNN_MASK[C]    = T T T T
-            #
-            #   -> Now insert point F at a distance < 3 to C, e.g. 1.5
-            #      KNN_INDICES[C] = C D F E
-            #      KNN_MASK[C]    = T T T T
-            farthest_neighbor_index = new_knn_mask_row.argmin()
-            if knn_dists_row[farthest_neighbor_index - 1] == insertion_knn_dists[i]:
-                # 1.
-                new_knn_mask_row[farthest_neighbor_index] = True
-            elif (
-                knn_dists_row[farthest_neighbor_index - 1]
-                == knn_dists_row[farthest_neighbor_index - 2]
-            ):
-                # 2.
-                if (n_neighbors - 1 == insertion_indices[i]) or (
-                    knn_dists_row[
-                        n_neighbors - 1 - (insertion_indices[i] < n_neighbors - 1)
-                    ]
-                    != knn_dists_row[n_neighbors - 1]
-                ):
-                    # 2.1
-                    new_knn_mask_row[n_neighbors:] = False
-                else:
-                    # 2.2
-                    new_knn_mask_row[farthest_neighbor_index] = True
+
+            # Update knn_mask
+            old_farthest_neighbor_distance = knn_dists_row[k]
+            if pos == k:
+                # Index is the new farthest neighbor
+                new_farthest_neighbor_distance = index_distance
+            else:
+                # Check what the new farthest neighbor distance is
+                new_farthest_neighbor_distance = knn_dists_row[
+                    new_knn_indices_row[k] - indices_shifted_by
+                ]
+
+            if old_farthest_neighbor_distance == new_farthest_neighbor_distance:
+                # Farthest neighbor did not change. Mask grows by 1.
+                # TODO argmin on np.bool currently does not support parallel=True
+                #      Tracked in: https://github.com/numba/numba/issues/5263
+                new_knn_mask_row[new_knn_mask_row.argmin()] = True
+            else:
+                # Farthest neighbor did change, shrink mask to k.
+                new_knn_mask_row[k + 1 :] = False
         else:
             new_knn_indices_row[:-1] = knn_indices_row
+
+    # TODO maybe trim array based on mask. check if performance increase.
     return new_knn_indices, new_knn_mask
 
 
@@ -572,11 +544,11 @@ def fuzzy_simplicial_set(
 @numba.njit(parallel=True, fastmath=True, cache=True)
 def fti(
     X_dmat,
+    X_knn_mask,
     X_knn_dists,
     X_knn_indices_rshifted,
     X_knn_dists_xprime_insertion_indices,
-    X_knn_mask,
-    Xprime_to_X_dmat,
+    Xprime_to_X_dmat,  # TODO consider moving the concatenation of 0-column in here
     Xprime_to_X_knn_indices_rshifted,
     Xprime_to_X_knn_mask,
     k,
@@ -586,111 +558,178 @@ def fti(
     reference dataset X and another dataset Xprime.
 
     Note k might be greater for some points than the initial k due to
-    AdapativeKNearestNeighbors.
+    `parallel_adaptive_knn`. This is denoted by m >= k
 
     Parameters
     ----------
     X_dmat: float array of shape (n_samples, n_samples)
         Pairwise distance matrix of points in X.
 
-    X_knn_dists: float array of shape (n_samples, k)
+    X_knn_mask: bool array of shape (n_samples, m)
+        Masks out indices and distances from X_knn that are not valid. See note
+        for `parallel_adaptive_knn`.
+
+    X_knn_dists: float array of shape (n_samples, m)
         Distances of the k-nearest neighbors in X.
 
-    X_knn_indices: int array of shape (n_samples, k)
+    X_knn_indices_rshifted: int array of shape (n_samples, m)
         Indices into the pairwise distance matrix of k-nearest neighbors in X.
         Shifted by 1 to the right to speed up computation later.
 
-    X_knn_dists_xprime_insertion_indices: int array of shape (n_samples)
+    X_knn_dists_xprime_insertion_indices: int array of shape (n_samples_2, n_samples)
         Insertion indices into X_knn_dists for points in Xprime.
 
-    X_knn_mask: bool array of shape (n_samples, k)
-        Masks out indices and distances from X_knn that are not valid. See note
-        for AdapativeKNearestNeighbors.
+    Xprime_to_X_dmat: float array of shape (n_samples_2, n_samples+1)
+        Distances of points in Xprime to points in X. Last column has to be
+        all 0.
 
-    Xprime_to_X_dmat: float array of shape (n_samples, n_samples_2)
-        Distances of points in X to points in Xprime.
-
-    Xprime_to_X_knn_indices_rshifted: int array of shape (n_samples, k)
+    Xprime_to_X_knn_indices_rshifted: int array of shape (n_samples_2, m)
         Indices into the the pairwise distance matrix Xprime_to_X_dmat.
         Shifted by 1 to the right to speed up computation later.
 
-    Xprime_to_X_knn_mask: bool array of shape (n_samples, k)
-        Masks out indices and distances from Xprime_knn that are not valid. See
-        note for AdapativeKNearestNeighbors.
+    Xprime_to_X_knn_mask: bool array of shape (n_samples_2, m)
+        Masks out indices and distances from Xprime_to_X_knn_indices_rshifted
+        that are not valid. See note for `parallel_adaptive_knn`.
 
     k: int
-        The k for k-nearest neighbor search. Note that this definition of k
+        The k for k-nearest neighbor search. Note, that this definition of k
         will include the center point itself.
+
+        A -- B -- C -- D
+
+        3-NN of A is C
+        4-NN of A is D
 
     local_connectivity: int (optional, default 0)
         The local connectivity required -- i.e. the number of nearest
         neighbors that should be assumed to be connected at a local level.
         The higher this value the more connected the manifold becomes
         locally. In practice this should be set to 0.
+
     Returns
-    -------    
+    -------
     P_Xprime: array of shape (n_samples_2)
         List of sum of edge probabilities of points in Xprime when added to X.
     """
+    n_samples = X_dmat.shape[0]
+    n_samples_2 = X_knn_dists_xprime_insertion_indices.shape[0]
+    m = X_knn_mask.shape[1]
+
+    assert k <= m
+
+    assert X_knn_mask.shape == X_knn_dists.shape
+    assert X_knn_mask.shape == X_knn_indices_rshifted.shape
+
+    assert X_knn_dists_xprime_insertion_indices.shape[0] == n_samples_2
+    assert X_knn_dists_xprime_insertion_indices.shape[1] == n_samples
+
+    assert Xprime_to_X_dmat.shape[0] == n_samples_2
+    assert Xprime_to_X_dmat.shape[1] == n_samples
+
+    assert Xprime_to_X_knn_indices_rshifted.shape[0] == n_samples_2
+    assert Xprime_to_X_knn_indices_rshifted.shape[1] == m
+
+    assert Xprime_to_X_knn_indices_rshifted.shape == Xprime_to_X_knn_mask.shape
+
+    # We append 0 distances, because we later left shift the indices after adding
+    # the 0 index. This way we can map the knn_index of -1 to a distance of 0 in
+    # a single pass.
+    #
+    # shape = [n_samples_2, n_samples+1]
+    Xprime_to_X_dmat = np.concatenate(
+        (
+            Xprime_to_X_dmat,
+            np.zeros((Xprime_to_X_dmat.shape[0], 1), dtype=Xprime_to_X_dmat.dtype),
+        ),
+        axis=1,
+    )
+
     P_Xprime = np.empty(Xprime_to_X_dmat.shape[0], dtype=np.float64)
     for i in numba.prange(Xprime_to_X_dmat.shape[0]):
-        # Indices of xprime to points in **X**
-        # Solution for xprime: This is a list of indices to the k-nearest neighbors of xprime
+        # Indices of Xprime to points in **X**
+        # Solution for Xprime: This is a list of indices to the k-nearest neighbors of Xprime
+        # shape = [k] # TODO currently +1
         xprime_knn_indices = Xprime_to_X_knn_indices_rshifted[i]
-        xprime_knn_dists = Xprime_to_X_dmat[i]
+
+        # shape = [k] # TODO currently +1
         xprime_knn_mask = Xprime_to_X_knn_mask[i]
 
-        # Indices of where xprime is located as a nearest neighbor of each Point in X
+        # shape = [n_samples+1]
+        xprime_dists = Xprime_to_X_dmat[i]
+
+        # Indices of where Xprime is located as a nearest neighbor of each Point in X
+        # shape = [n_samples]
         xprime_insertion_indices = X_knn_dists_xprime_insertion_indices[i]
 
-        # Insert the xprime (index 0) at the correct position into our sort indices
+        # Insert the Xprime (index 0) at the correct position into our sort indices
         # Solution for X: This is a 2-D array of indices to the k-nearest neighbors
         #                 for each point in X.
+        # shape = [n_samples, m+1]
         X_knn_indices_with_xprime, X_knn_mask_with_xprime = insert_and_update_mask(
             X_knn_indices_rshifted,
             X_knn_mask,
             X_knn_dists,
-            0.0,
+            0,
             xprime_insertion_indices,
-            xprime_knn_dists,
+            xprime_dists,
             k,
         )
 
         # Solution: knn_indices
-        knn_indices = np.vstack(
-            (np.expand_dims(xprime_knn_indices, 0), X_knn_indices_with_xprime)
+        #
+        # [xprime_knn_indices,
+        #  X_knn_indices_with_xprime]
+        #
+        # shape = [n_samples+1, m+1]
+        knn_indices = np.zeros(
+            (n_samples + 1, X_knn_indices_with_xprime.shape[1]),
+            dtype=X_knn_indices_with_xprime.dtype,
         )
+
+        knn_indices[0, : xprime_knn_indices.shape[0]] = xprime_knn_indices
+        knn_indices[1:, :] = X_knn_indices_with_xprime
 
         # Solution: knn_mask
-        knn_mask = np.vstack(
-            (np.expand_dims(xprime_knn_mask, 0), X_knn_mask_with_xprime)
+        #
+        # [xprime_knn_mask,
+        #  X_knn_mask_with_xprime]
+        #
+        # shape = [n_samples+1, m+1]
+        knn_mask = np.zeros(
+            (n_samples + 1, X_knn_mask_with_xprime.shape[1]),
+            dtype=X_knn_mask_with_xprime.dtype,
         )
 
+        knn_mask[0, : xprime_knn_mask.shape[0]] = xprime_knn_mask
+        knn_mask[1:, :] = X_knn_mask_with_xprime
+
         # We have to left shift the indices to use them to index into Xprime_to_X_dmat
-        # We can do this inplace because we will not touch that row again
+        # This will turn the previously added 0 index into -1.
+        # We can do this inplace because we will not touch that row again.
         np.subtract(xprime_knn_indices, 1, xprime_knn_indices)
 
         # Distance to itself is 0 due to prepend 0 to Xprime_to_X_dmat trick.
-        # Solution xprime: This is a list of distances to the k-nearest neighbors of xprime
-        xprime_knn_dists = xprime_knn_dists[xprime_knn_indices]
+        # Solution Xprime: This is a list of distances to the k-nearest neighbors of Xprime.
+        xprime_knn_dists = xprime_dists[xprime_knn_indices]
 
         # We have to left shift indices back to use them as indices into X_dmat.
         # We can do this inplace because we will not touch the indices again
         np.subtract(X_knn_indices_with_xprime, 1, X_knn_indices_with_xprime)
+
         # Get the distances from X_dmat
         X_knn_dists_with_xprime = parallel_take_along_axis(
             X_dmat, X_knn_indices_with_xprime
         )
 
-        # Due to the left shift the 0 index of our xprime is now -1. We therefore determine
+        # Due to the left shift the 0 index of our Xprime is now -1. We therefore determine
         # all indices where it is -1 and use them to select the correct distances from
-        # Xprime_to_X_dmat instead of X_dmat
+        # Xprime_to_X_dmat instead of X_dmat.
         new_point_indices = np.where(X_knn_indices_with_xprime == -1)
+
         # Get the distances from Xprime_to_X_dmat and override incorrect values in
         # X_knn_dists_with_xprime.
         # Solution X: This is a 2-D array of distances to the k-nearest neighbors for
         #             each point in X.
-        # X_knn_dists_with_xprime[new_point_indices] = Xprime_to_X_dmat[i][new_point_indices[0]]
         parallel_put_by_advanced_index(
             X_knn_dists_with_xprime,
             new_point_indices,
@@ -698,9 +737,13 @@ def fti(
         )
 
         # Solution: knn_dists
-        knn_dists = np.vstack(
-            (np.expand_dims(xprime_knn_dists, 0), X_knn_dists_with_xprime)
+        knn_dists = np.zeros(
+            (n_samples + 1, X_knn_dists_with_xprime.shape[1]),
+            dtype=X_knn_dists_with_xprime.dtype,
         )
+
+        knn_dists[0, 0 : xprime_knn_dists.shape[0]] = xprime_knn_dists
+        knn_dists[1:, :] = X_knn_dists_with_xprime
 
         # TODO It might be possible to omit this and do it in smooth_knn_dist instead
         # Set Mask == False to -1 for fuzzy_simplical_set
@@ -717,7 +760,7 @@ def fti(
         )
 
         # rows, cols, vals describe a sparse matrix, we only want the dense values (vals == 0).
-        # We also do not want xprime's edges (rows == 0, cols == 0)
+        # We also do not want Xprime's edges (rows == 0, cols == 0).
         view_indices = np.where(
             np.logical_and(np.logical_and(rows != 0, cols != 0), vals != 0)
         )[0]
@@ -745,8 +788,13 @@ def fuzzy_topology_impact(
         Other data.
 
     k: int
-        The k for k-nearest neighbor search. Note that this definition of k
+        The k for k-nearest neighbor search. Note, that this definition of k
         will include the center point itself.
+        
+        A -- B -- C -- D
+
+        3-NN of A is C
+        4-NN of A is D
 
     metric : string, or callable (optional, default euclidean)
         The metric to use when calculating distance between instances in a
@@ -771,29 +819,29 @@ def fuzzy_topology_impact(
     Returns
     -------
     impact: float
-        Impact is the fuzzy topology impact given X and Xprime.
-    
-    P_X: float
-        Sum of edge probabilities in fuzzy simplicial sets of X.
-    
-    
-    P_X_Xprime_minus_xprime: array of shape (n_samples_2)
-        List of sum of edge probabilities of points in Xprime when added to X minus
-        the edge probabilities of edges from and to points in Xprime.
-    
-    fs_set_X.size: int
-        The number of edges in fuzzy simplicial sets of X.
+        The fuzzy topology impact given X and Xprime.
     """
     X = X.astype(np.float64, copy=False)
     Xprime = Xprime.astype(np.float64, copy=False)
 
     # TODO Replace pairwise_distances with a faster numba version
     if X_dmat is None:
+        # Compute pairwise distance matrix for REFERENCE
+        #
+        # shape = [n_samples, n_samples]
         X_dmat = pairwise_distances(X, metric=metric)
 
-    X_knn_indices, X_knn_mask = parallel_adaptive_knn_indices(X_dmat, k)
+    # Compute k-NN indices for REFERENCE
+    #
+    # shape = [n_samples, k+e1], where e1 >= 0
+    X_knn_indices, X_knn_mask = parallel_adaptive_knn(X_dmat, k)
+
+    # Get k-NN distances for REFERENCE
+    #
+    # shape = [n_samples, k+e1], where e1 >= 0
     # TODO Copy might not be necessary
     X_knn_dists = X_dmat[np.arange(X_dmat.shape[0])[:, None], X_knn_indices].copy()
+    # Set distances that are masked out to -1
     X_knn_dists[np.logical_not(X_knn_mask)] = -1
 
     _, _, fs_set_X = fuzzy_simplicial_set(
@@ -802,8 +850,9 @@ def fuzzy_topology_impact(
 
     P_X = np.sum(fs_set_X)
 
-    # The "xprime" would be prependend
-    # If train dmat = [5 x 5] it would be [6 x 6] with xprime prepended
+    # As the center node itself is at index 0, but is not included in our computation,
+    # we have to increment all indices by 1.
+    # If train dmat = [5 x 5] it would be [6 x 6] with Xprime prepended
     # We therefore shift the [5 x 5] indices by 1 to the right
     #  __         __
     # |0 _        _|
@@ -812,35 +861,63 @@ def fuzzy_topology_impact(
     # | |3         |
     # | |4         |
     # |_|5        _|
-    #
+    np.add(X_knn_indices, 1, out=X_knn_indices)
     # Renaming is just for clarity
     X_knn_indices_rshifted = X_knn_indices
-    np.add(X_knn_indices_rshifted, 1, out=X_knn_indices_rshifted)
 
+    # Compute pairwise distance matrix between REFERENCE - OTHER
+    # => For every point in Xprime, compute how far it is from every point in X
+    # Row = Xprime, Col = Distance to Train Point
+    #
+    # shape = [n_samples_2, n_samples]
     # TODO Replace pairwise_distances with a faster numba version
-    # Row = xprime, Col = Distance to Train Point
     Xprime_to_X_dmat = pairwise_distances(Xprime, X, metric=metric)
 
+    # Compute where OTHER points lie within the k-NN of REFERENCE
     # Row = Point, Column = Where to insert
+    #
+    # shape = [n_samples_2, n_samples]
     X_knn_dists_xprime_insertion_indices = parallel_searchsorted(
         X_knn_dists, Xprime_to_X_dmat.T
     ).T
 
-    # Row = xprime, Col = Index into dmat
-    # Size = k (We are only interested in the k closest neighbors, including xprime itself)
-    # Therefore we remove the furthest point (k - 1).
-    # Xprime_to_X_dmat_argsort = parallel_argsort(Xprime_to_X_dmat)[:, : k - 1]
-    Xprime_to_X_knn_indices, Xprime_to_X_knn_mask = parallel_adaptive_knn_indices(
+    # Compute k-NN indices for OTHER to REFERENCE.
+    #
+    # We set k-1 as we later include the center point as the closest neighbor.
+    #
+    # Row = Xprime, Col = Index into dmat
+    #
+    # We now have:
+    # [[1-NN, 2-NN, ..., (k-1+e2)-NN],
+    #  [5, 3, ..., (k-1+e2)-NN],         // example
+    #  [...],
+    #  [1-NN, 2-NN, ..., (k-1+e2)-NN]]
+    #
+    # shape = [n_samples_2, k-1+e2], where e2 >= 0
+    Xprime_to_X_knn_indices, Xprime_to_X_knn_mask = parallel_adaptive_knn(
         Xprime_to_X_dmat, k - 1
     )
 
+    # Shift by 1 due to prepend [see X_knn_indices_rshifted]
+    # We now have:
+    # [[1-NN, 2-NN, ..., (k-1+e2)-NN],
+    #  [6, 4, ..., (k-1+e)-NN],         // example
+    #  [...],
+    #  [1-NN, 2-NN, ..., (k-1+e2)-NN]]
+    np.add(Xprime_to_X_knn_indices, 1, out=Xprime_to_X_knn_indices)
     # Renaming is just for clarity
     Xprime_to_X_knn_indices_rshifted = Xprime_to_X_knn_indices
-    # Shift by 1 due to prepend [see X_knn_indices_rshifted]
-    np.add(Xprime_to_X_knn_indices_rshifted, 1, out=Xprime_to_X_knn_indices_rshifted)
 
     # Because our interpretation of k-NN includes the center itself we have to
     # prepend the center as the point with the closest distance (index 0)
+    #
+    # We now have:
+    # [[0, 1-NN, 2-NN, ..., (k+e2)-NN],
+    #  [0, 5, 3, ..., (k+e2)-NN],         // example
+    #  [...],
+    #  [0, 1-NN, 2-NN, ..., (k+e2)-NN]]
+    #
+    # shape = [n_samples_2, k+e2], where e2 >= 0
     Xprime_to_X_knn_indices_rshifted = np.concatenate(
         (
             np.zeros(
@@ -852,20 +929,7 @@ def fuzzy_topology_impact(
         axis=-1,
     )
 
-    # X_dmat might be larger than Xprime_to_X_dmat due to identical farthest k-nearest neighbors
-    Xprime_to_X_knn_indices_rshifted_tmp = np.zeros(
-        (
-            Xprime_to_X_knn_indices_rshifted.shape[0],
-            X_knn_indices_rshifted.shape[1] + 1,
-        ),
-        dtype=Xprime_to_X_knn_indices_rshifted.dtype,
-    )
-    Xprime_to_X_knn_indices_rshifted_tmp[
-        :, : Xprime_to_X_knn_indices_rshifted.shape[1]
-    ] = Xprime_to_X_knn_indices_rshifted
-    Xprime_to_X_knn_indices_rshifted = Xprime_to_X_knn_indices_rshifted_tmp
-
-    # We therefore also have to prepend a True to our mask
+    # We have to prepend a True to our mask, because we prepended the center point
     Xprime_to_X_knn_mask = np.concatenate(
         (
             np.ones(
@@ -876,29 +940,66 @@ def fuzzy_topology_impact(
         axis=1,
     )
 
-    # X_knn_mask might be larger than Xprime_to_X_knn_mask due to identical farthest k-nearest neighbors
-    Xprime_to_X_mask_tmp = np.zeros(
-        (Xprime_to_X_knn_mask.shape[0], X_knn_mask.shape[1] + 1),
-        dtype=Xprime_to_X_knn_mask.dtype,
+    # Handle the case where k+e1 < k+e2.
+    # This can happen when a point in Xprime has more than k+e1 neighbors in X.
+    padding = (
+        Xprime_to_X_knn_indices_rshifted.shape[1] - X_knn_indices_rshifted.shape[1]
     )
-    Xprime_to_X_mask_tmp[:, : Xprime_to_X_knn_mask.shape[1]] = Xprime_to_X_knn_mask
-    Xprime_to_X_knn_mask = Xprime_to_X_mask_tmp
-
-    # We append 0 distances to later map the knn_index of -1 to a distance of 0
-    Xprime_to_X_dmat = np.concatenate(
-        (
-            Xprime_to_X_dmat,
-            np.zeros((Xprime_to_X_dmat.shape[0], 1), dtype=Xprime_to_X_dmat.dtype),
-        ),
-        axis=1,
-    )
-
+    if padding > 0:
+        # Simply expand all arrays with zeros and the mask with False
+        X_knn_dists = np.concatenate(
+            (
+                X_knn_dists,
+                np.zeros((X_knn_dists.shape[0], padding), dtype=X_knn_dists.dtype),
+            ),
+            axis=1,
+        )
+        X_knn_mask = np.concatenate(
+            (
+                X_knn_mask,
+                np.zeros((X_knn_mask.shape[0], padding), dtype=X_knn_mask.dtype),
+            ),
+            axis=1,
+        )
+        X_knn_indices_rshifted = np.concatenate(
+            (
+                X_knn_indices_rshifted,
+                np.zeros(
+                    (X_knn_indices_rshifted.shape[0], padding),
+                    dtype=X_knn_indices_rshifted.dtype,
+                ),
+            ),
+            axis=1,
+        )
+    elif padding < 0:
+        padding = abs(padding)
+        # Simply expand all arrays with zeros and the mask with False
+        Xprime_to_X_knn_mask = np.concatenate(
+            (
+                Xprime_to_X_knn_mask,
+                np.zeros(
+                    (Xprime_to_X_knn_mask.shape[0], padding),
+                    dtype=Xprime_to_X_knn_mask.dtype,
+                ),
+            ),
+            axis=1,
+        )
+        Xprime_to_X_knn_indices_rshifted = np.concatenate(
+            (
+                Xprime_to_X_knn_indices_rshifted,
+                np.zeros(
+                    (Xprime_to_X_knn_indices_rshifted.shape[0], padding),
+                    dtype=Xprime_to_X_knn_indices_rshifted.dtype,
+                ),
+            ),
+            axis=1,
+        )
     P_X_Xprime_minus_xprime = fti(
         X_dmat,
+        X_knn_mask,
         X_knn_dists,
         X_knn_indices_rshifted,
         X_knn_dists_xprime_insertion_indices,
-        X_knn_mask,
         Xprime_to_X_dmat,
         Xprime_to_X_knn_indices_rshifted,
         Xprime_to_X_knn_mask,
