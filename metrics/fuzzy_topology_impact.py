@@ -179,7 +179,6 @@ def insert_and_update_mask(
     insertion_indices,
     insertion_knn_dists,
     k,
-    indices_shifted_by=1,
 ):
     """Allows updating an `parallel_adaptive_knn` result and its knn_mask. Inserts
     index at insertion_indices into knn_indices by shifting original values to
@@ -217,10 +216,6 @@ def insert_and_update_mask(
 
         3-NN of A is C
         4-NN of A is D
-
-    indices_shifted_by : int
-        The amount of places knn_indices has been shifted. A positive value
-        indicates a right shift.
 
     Returns
     -------
@@ -271,9 +266,7 @@ def insert_and_update_mask(
                 new_farthest_neighbor_distance = index_distance
             else:
                 # Check what the new farthest neighbor distance is
-                new_farthest_neighbor_distance = knn_dists_row[
-                    new_knn_indices_row[k] - indices_shifted_by
-                ]
+                new_farthest_neighbor_distance = knn_dists_row[k-1]
 
             if old_farthest_neighbor_distance == new_farthest_neighbor_distance:
                 # Farthest neighbor did not change. Mask grows by 1.
