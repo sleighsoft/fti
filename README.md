@@ -1,6 +1,6 @@
 # Improving the Evaluation of Generative Models with Fuzzy Logic
 
-Official code for [Improving the Evaluation of Generative Models with Fuzzy Logic]() by Julian Niedermeier and Gonçalo Mordido.
+Official code for [Improving the Evaluation of Generative Models with Fuzzy Logic]() by Julian Niedermeier and Gonçalo Mordido, presented at AAAI 2020 Meta-Eval.
 
 ## Setup
 
@@ -53,9 +53,8 @@ Scripts to prepare the data and run all experiments are located under `scripts/`
 If you would like to contribute your own experiments or metrics feel free to open up a pull request to make evaluation easier in the future.
 
 ## Citation
-```
-Coming soon
-```
+
+Niedermeier, Julian, Gonçalo Mordido, and Christoph Meinel. "Improving the Evaluation of Generative Models with Fuzzy Logic." arXiv preprint arXiv:2002.03772 (2020).
 
 ## License
 
